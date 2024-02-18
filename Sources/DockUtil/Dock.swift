@@ -6,7 +6,7 @@
 //  Copyright © 2022 Kyle Crawford. All rights reserved.
 //
 
-import Foundation
+import Cocoa
 import SystemConfiguration
 
 class Dock {
@@ -31,16 +31,23 @@ class Dock {
         return []
     }
     
+    
     func runningAsConsoleUser() -> Bool {
-        return ProcessInfo.processInfo.userName == consoleUser()
+        return ProcessInfo.processInfo.userName.lowercased() == consoleUser()?.lowercased()
     }
     
     func isLoggedInUserDock() -> Bool {
         guard let user = consoleUser() else { return false }
         let loggedInUserPlistPath = URL(fileURLWithPath: NSHomeDirectoryForUser(user) ?? NSHomeDirectory()).appendingPathComponent("Library/Preferences/com.apple.dock.plist").path
-        gv > 0 ? print("Comparing", loggedInUserPlistPath, "to", self.path):nil
+        let caseInsensitivelyEquivalentDockPaths = self.path.lowercased() == loggedInUserPlistPath.lowercased()
 
-        return self.path == loggedInUserPlistPath
+        if caseInsensitivelyEquivalentDockPaths {
+            gv > 0 ? print("Ignoring case,", loggedInUserPlistPath, "and", self.path, "are the same so this dock is the logged in user's dock"):nil
+        } else {
+            gv > 0 ? print("Ignoring case,", loggedInUserPlistPath, "and", self.path, "are different so this dock is not the logged in user's dock"):nil
+        }
+        
+        return caseInsensitivelyEquivalentDockPaths
     }
     
     func read() {
@@ -56,6 +63,7 @@ class Dock {
         } else {
 
             // Read using defaults because we can't trust what is on disk and defaults uses cfprefs cache
+            gv > 0 ? print("Reading dock using defaults command"):nil
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
             p.arguments = ["export", path, "-"]
@@ -98,10 +106,14 @@ class Dock {
             CFPreferencesSynchronize(dockDomain as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
             
             if restart {
-                self.kickstart()
+                self.terminate()
             }
 
         } else {
+            gv > 0 ? print("Handling dock while running as \(ProcessInfo.processInfo.userName)"):nil
+            if ProcessInfo.processInfo.userName.lowercased() != "root" {
+                print("Warning: dockutil is not running as the user of this Dock nor root so dockutil may be unable to save the change or set the proper owner")
+            }
             for section in sections {
                 if let sectionItems = self.dockItems[section] {
                     let items = sectionItems.map({dockItem in
@@ -125,6 +137,7 @@ class Dock {
             }
                         
             if getpwuid(uid_t(originalOwnerID)) != nil { // make sure we have a valid uid we can run as
+                gv > 0 ? print("Using sudo to run defaults to write to dock as user \(String(originalOwnerID))"):nil
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
                 p.arguments = ["-u", "#\(originalOwnerID)", "/usr/bin/defaults", "import", path, "-"]
@@ -136,6 +149,7 @@ class Dock {
                 p.waitUntilExit()
                 gv > 0 ? print(p.terminationStatus):nil
             } else {
+                gv > 0 ? print("Unable to run as user \(originalOwnerID). Using defaults to write to dock (will attempt to chown after)"):nil
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
                 p.arguments = ["import", path, "-"]
@@ -145,13 +159,18 @@ class Dock {
                 stdInPipe.fileHandleForWriting.write(plistData)
                 stdInPipe.fileHandleForWriting.closeFile()
                 p.waitUntilExit()
-                gv > 0 ? print(p.terminationStatus):nil
-                try? FileManager.default.setAttributes([.ownerAccountID: originalOwnerID], ofItemAtPath: self.path) // chown to original owner
+                gv > 0 ? print(p.arguments, p.terminationStatus):nil
+                gv > 0 ? print("Changing owner to original owner \(String(originalOwnerID))"):nil
+                do {
+                    try FileManager.default.setAttributes([.ownerAccountID: originalOwnerID], ofItemAtPath: self.path) // chown to original owner
+                } catch {
+                    print("Failed to set owner to original owner \(String(originalOwnerID))")
+                }
             }
 
             if restart && isLoggedInUserDock() {
                 gv > 0 ? print("Restarting dock for console user"):nil
-                kickstart()
+                terminate()
             }
 
         }
@@ -199,21 +218,22 @@ class Dock {
         return uid
     }
     
-    func kickstart() {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        p.arguments = [
-            "kickstart",
-            "-k",
-            "gui/\(String(consoleUserUID()))/com.apple.Dock.agent"
-        ]
-        do {
-            try p.run()
-        } catch {
-            print(error)
+    func terminate() {
+        if let runningDock = NSWorkspace.shared.runningApplications.first(where: {$0.bundleIdentifier == "com.apple.dock"}) {
+            gv > 0 ? print("Terminating running Dock"):nil
+            runningDock.terminate()
+        } else {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            p.arguments = ["Dock"]
+            do {
+                try p.run()
+            } catch {
+                print(error)
+            }
+            p.waitUntilExit()
+            gv > 0 ? print(p.arguments, p.terminationStatus):nil
         }
-        p.waitUntilExit()
-        gv > 0 ? print(p.arguments, p.terminationStatus):nil
     }
 
     func add(_ _opts: DockAdditionOptions) -> Bool {
